@@ -38,10 +38,10 @@ graph TD
 
 | Pipeline | Approche | Justification |
 |----------|----------|---------------|
-| catalog_ingestion | ETL | ... |
-| streaming_events | ... | ... |
-| aggregation | ... | ... |
-| streaming_trends (Spark) | ... | ... |
+| catalog_ingestion | ETL | Les données viennent de sources externes désordonnées. Il faut nettoyer,    dédupliquer, valider les UUIDs avant d'insérer sinon on pollue la base |
+| streaming_events | ELT | Les événements arrivent vite en masse. On charge tout brut dans PostgreSQL, les transformations (agrégations) se font après par Airflow et Spark |
+| aggregation | ELT | Les données sont déjà dans PostgreSQL. On transforme directement avec du SQL (GROUP BY, COUNT) sans bouger les données |
+| streaming_trends (Spark) | ETL | Spark reçoit les événements Kafka bruts, calcule les fenêtres glissantes en mémoire, puis écrit le résultat dans realtime_top_tracks. Impossible de faire autrement en streaming |
 
 ### Partitionnement Parquet
 
