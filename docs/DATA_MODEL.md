@@ -2,7 +2,7 @@
 
 Diagramme réalisé avec dbdiagram.io
 
-![Diagramme ERD](docs/diagramme_ERD.png)
+![Diagramme ERD](diagramme_ERD.png)
 
 ## Pourquoi deux index sur listening_events ?
 
