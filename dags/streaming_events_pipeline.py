@@ -30,6 +30,18 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.decorators import task
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+import json
+import os
+import redis
+import uuid
+import os
+from io import BytesIO
+import boto3
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 DAG_DOC = """
 ## streaming_events_pipeline
@@ -73,7 +85,7 @@ with DAG(
     dag_id="streaming_events_pipeline",
     default_args=DEFAULT_ARGS,
     description="Micro-batch : Redis → validation → enrichissement → MinIO + PostgreSQL",
-    schedule_interval="*/5 * * * *",
+    schedule="*/5 * * * *",
     catchup=False,
     max_active_runs=1,
     tags=["spotify", "phase-1", "events", "streaming"],
@@ -97,7 +109,32 @@ with DAG(
         (lpush) que le DAG consomme avec rpop/lrange.
         Discutez avec l'équipe Infra & P2P de la stratégie choisie.
         """
-        raise NotImplementedError("TODO : implémenter consume_from_redis()")
+        r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+
+        result = {"listening": [], "p2p_network": []}
+
+        channel_map = {
+            "listening_events":  "listening",
+            "p2p_network_events": "p2p_network",
+        }
+
+        for redis_key, bucket in channel_map.items():
+            # Lecture + suppression atomique via pipeline
+            pipe = r.pipeline()
+            pipe.lrange(redis_key, 0, 49_999)      
+            pipe.ltrim(redis_key, 50_000, -1)       
+            raw_messages, _ = pipe.execute()
+        
+        parsed = []
+        for msg in raw_messages:
+            try:
+                parsed.append(json.loads(msg))
+            except json.JSONDecodeError:
+                pass  
+
+        result[bucket] = parsed
+
+        return result
 
     @task(task_id="validate_events")
     def validate_events(raw_events: dict, **context) -> dict:
@@ -114,7 +151,71 @@ with DAG(
             4. Invalides → INSERT dans dead_letter_events avec error_type="validation"
             5. Retourner {"valid_listening": [...], "valid_p2p": [...], "errors": N}
         """
-        raise NotImplementedError("TODO : implémenter validate_events()")
+        REQUIRED_LISTENING = {"event_id", "user_id", "track_id", "timestamp", "duration_ms"}
+        REQUIRED_P2P       = {"event_id", "peer_id", "timestamp", "event_type"}
+
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+        valid_listening, valid_p2p, invalid = [], [], []
+
+        # --- Validation listening ---
+        for evt in raw_events.get("listening", []):
+            missing = REQUIRED_LISTENING - evt.keys()
+            if missing:
+                evt["_error"] = f"Champs manquants : {missing}"
+                invalid.append(evt)
+                continue
+
+            try:
+                datetime.fromisoformat(str(evt["timestamp"]))
+            except (ValueError, TypeError):
+                evt["_error"] = f"timestamp invalide : {evt['timestamp']}"
+                invalid.append(evt)
+                continue
+            if not isinstance(evt["duration_ms"], (int, float)) or evt["duration_ms"] <= 0:
+                evt["_error"] = f"duration_ms invalide : {evt['duration_ms']}"
+                invalid.append(evt)
+                continue
+
+            valid_listening.append(evt)
+
+        # --- Validation p2p ---
+        for evt in raw_events.get("p2p_network", []):
+            missing = REQUIRED_P2P - evt.keys()
+            if missing:
+                evt["_error"] = f"Champs manquants : {missing}"
+                invalid.append(evt)
+                continue
+
+            try:
+                datetime.fromisoformat(str(evt["timestamp"]))
+            except (ValueError, TypeError):
+                evt["_error"] = f"timestamp invalide : {evt['timestamp']}"
+                invalid.append(evt)
+                continue
+
+            valid_p2p.append(evt)
+        
+        # --- Envoi en DLQ ---
+        if invalid:
+            rows = [
+                (str(uuid.uuid4()), json.dumps(evt), "validation", evt.get("_error", ""))
+                for evt in invalid
+            ]
+            hook.run(
+                """
+                INSERT INTO dead_letter_events (id, raw_payload, error_type, error_message)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                parameters=rows,
+            )
+    
+        return {
+        "valid_listening": valid_listening,
+        "valid_p2p":       valid_p2p,
+        "errors":          len(invalid),
+    }
 
     @task(task_id="enrich_events")
     def enrich_events(validated: dict, **context) -> list:
@@ -130,7 +231,59 @@ with DAG(
 
         Hint : faire une seule requête PostgreSQL avec IN clause plutôt qu'une par event.
         """
-        raise NotImplementedError("TODO : implémenter enrich_events()")
+        hook   = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        events = validated.get("valid_listening", [])
+
+        if not events:
+            return []
+
+        # 1. Collecte des track_ids distincts
+        track_ids = list({evt["track_id"] for evt in events})
+
+        # 2. Une seule requête pour tout le batch
+        rows = hook.get_records(
+            "SELECT id, title, artist_id, genre FROM tracks WHERE id = ANY(%s)",
+            parameters=(track_ids,),
+        )
+
+        # 3. Dictionnaire pour lookup O(1)
+        catalogue = {
+            row[0]: {
+                "track_title": row[1],
+                "artist_id":   row[2],
+                "genre":       row[3],
+            }
+            for row in rows
+        }
+
+        # 4. Enrichissement + détection des track_id inconnus
+        enriched, unknown = [], []
+
+        for evt in events:
+            meta = catalogue.get(evt["track_id"])
+
+            if meta is None:
+                evt["_error"] = f"track_id inconnu : {evt['track_id']}"
+                unknown.append(evt)
+            else:
+                enriched.append({**evt, **meta})  # fusion des deux dicts
+    
+     # 5. Inconnus → DLQ
+        if unknown:
+            rows_dlq = [
+                (str(uuid.uuid4()), json.dumps(evt), "unknown_track", evt["_error"])
+                for evt in unknown
+            ]
+            hook.run(
+                """
+                INSERT INTO dead_letter_events (id, raw_payload, error_type, error_message)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                parameters=rows_dlq,
+            )
+
+        return enriched
 
     @task(task_id="store_to_parquet")
     def store_to_parquet(enriched_events: list, **context) -> str:
@@ -148,7 +301,43 @@ with DAG(
 
         Hint : pyarrow.parquet.write_table() + boto3 pour l'upload
         """
-        raise NotImplementedError("TODO : implémenter store_to_parquet()")
+        if not enriched_events:
+            return ""
+
+        # 1. Calcul de la partition depuis la fin de la fenêtre temporelle
+        exec_dt  = context["data_interval_end"]
+        date_str = exec_dt.strftime("%Y-%m-%d")
+        hour_str = exec_dt.strftime("%H")
+        run_id   = context["run_id"].replace(":", "-").replace("+", "-")
+
+        # 2. DataFrame → Table PyArrow
+        df = pd.DataFrame(enriched_events)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        table = pa.Table.from_pandas(df, preserve_index=False)
+
+        # 3. Sérialisation en mémoire (pas de fichier tmp sur disque)
+        buf = BytesIO()
+        pq.write_table(table, buf, compression="snappy")
+        buf.seek(0)
+
+        # 4. Upload sur MinIO
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=os.getenv("MINIO_ENDPOINT", "http://minio:9000"),
+            aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+            aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
+        )
+
+        s3_key = (
+            f"listening_events/"
+            f"date={date_str}/"
+            f"hour={hour_str}/"
+            f"part-{run_id}.parquet"
+        )
+
+        s3.upload_fileobj(buf, os.getenv("MINIO_BUCKET", "spotify-parquet"), s3_key)
+
+        return f"s3://spotify-parquet/{s3_key}"
 
     @task(task_id="upsert_to_postgres")
     def upsert_to_postgres(enriched_events: list, **context) -> dict:
@@ -163,12 +352,92 @@ with DAG(
 
         Hint : utiliser executemany() avec des tuples pour les performances.
         """
-        raise NotImplementedError("TODO : implémenter upsert_to_postgres()")
+        if not enriched_events:
+            return {"inserted": 0, "skipped": 0}
+
+        hook   = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn   = hook.get_conn()
+        cursor = conn.cursor()
+
+        sql = """
+            INSERT INTO listening_events
+                (id, user_id, track_id, artist_id, genre, track_title, timestamp, duration_ms, raw_payload)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+        """
+
+        rows = [
+            (
+                evt["event_id"],
+                evt["user_id"],
+                evt["track_id"],
+                evt.get("artist_id"),
+                evt.get("genre"),
+                evt.get("track_title"),
+                evt["timestamp"],
+                evt["duration_ms"],
+                json.dumps(evt),
+            )
+            for evt in enriched_events
+        ]
+
+        cursor.executemany(sql, rows)
+        inserted = cursor.rowcount if cursor.rowcount >= 0 else len(rows)
+        conn.commit()
+        cursor.close()
+
+        return {"inserted": inserted, "skipped": len(rows) - inserted}
+
+    @task.branch(task_id="branch_by_event_type")
+    def branch_by_event_type(raw_events: dict) -> list:
+        branches = []
+
+        if raw_events.get("listening"):
+            branches.append("validate_events")
+
+        if raw_events.get("p2p_network"):
+            branches.append("handle_p2p_events")
+
+        if not branches:
+            branches = ["skip_pipeline"]
+
+        return branches
+
+
+    @task(task_id="handle_p2p_events")
+    def handle_p2p_events(raw_events: dict) -> None:
+        # Phase 2 — stockage dédié p2p, pour l'instant on logue juste
+        import logging
+        log = logging.getLogger(__name__)
+        count = len(raw_events.get("p2p_network", []))
+        log.info("handle_p2p_events : %d events reçus, traitement Phase 2 à venir.", count)
+
+
+    @task(task_id="skip_pipeline")
+    def skip_pipeline() -> None:
+        import logging
+        logging.getLogger(__name__).info("Fenêtre vide — rien à traiter.")
 
     # ── Orchestration ─────────────────────────────────────────
-    raw       = consume_from_redis()
+    raw    = consume_from_redis()
+    branch = branch_by_event_type(raw)
+
+    # Branche listening
     validated = validate_events(raw)
     enriched  = enrich_events(validated)
-
     store_to_parquet(enriched)
     upsert_to_postgres(enriched)
+
+    # Branche p2p
+    handle_p2p_events(raw)
+
+    # Branche vide
+    skip_pipeline()
+
+    # Dépendances de branchement
+    branch >> validated
+    branch >> handle_p2p_events(raw)
+    branch >> skip_pipeline()
+
+if __name__ == "__main__":
+    dag.test()

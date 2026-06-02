@@ -37,3 +37,10 @@ pytest-mock==3.12.0
 # ── Qualité de code
 ruff==0.3.0
 pylint==3.1.0
+
+apache-airflow-providers-postgres
+redis
+boto3
+pandas
+pyarrow
+psycopg2-binary
