@@ -4,9 +4,11 @@ Spark Job : streaming_trends_job
 Consomme le topic Kafka `listening_events` et produit en continu
 les tendances musicales temps réel.
 
+
 Outputs :
     - PostgreSQL → table `realtime_top_tracks` (top 10 par fenêtre de 5 min)
-    - Redis      → clé `top_tracks:live` (top genres par sliding window)
+    Redis       → clé `top_tracks:live` (top genres par sliding window)
+
 
 Lancement :
     spark-submit \\
@@ -14,14 +16,16 @@ Lancement :
                    org.postgresql:postgresql:42.7.1 \\
         spark_jobs/streaming_trends_job.py
 
+
 TODO :
-    [ ] Implémenter la lecture du topic Kafka avec readStream
-    [ ] Désérialiser les messages JSON avec le bon schéma
+    [x] Implémenter la lecture du topic Kafka avec readStream
+    [x] Désérialiser les messages JSON avec le bon schéma
     [ ] Implémenter les fenêtres tumbling de 5 minutes
     [ ] Implémenter les sliding windows pour les genres (15 min / 5 min)
     [ ] Configurer le checkpoint sur MinIO
     [ ] Écrire les résultats dans PostgreSQL et Redis
 """
+
 
 import os
 from pyspark.sql import SparkSession
@@ -31,9 +35,11 @@ from pyspark.sql.types import (
     StringType, IntegerType, BooleanType, TimestampType
 )
 
+
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────
+
 
 KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP",  "kafka-1:9092")
 KAFKA_TOPIC      = "listening_events"
@@ -41,14 +47,16 @@ CHECKPOINT_PATH  = "s3a://spotify-checkpoints/streaming_trends"
 POSTGRES_URL     = os.getenv("SPOTIFY_POSTGRES_URL",
                              "jdbc:postgresql://postgres:5432/spotify")
 POSTGRES_PROPS   = {
-    "user":   "spotify",
+    "user":    "spotify",
     "password": "spotify",
     "driver": "org.postgresql.Driver",
 }
 
+
 # ─────────────────────────────────────────────────────────────
 # SCHÉMA DES ÉVÉNEMENTS D'ÉCOUTE
 # ─────────────────────────────────────────────────────────────
+
 
 LISTENING_EVENT_SCHEMA = StructType([
     StructField("event_id",    StringType(),    False),
@@ -64,15 +72,15 @@ LISTENING_EVENT_SCHEMA = StructType([
 ])
 
 
+
 # ─────────────────────────────────────────────────────────────
 # INITIALISATION SPARK
 # ─────────────────────────────────────────────────────────────
 
+
 def create_spark_session() -> SparkSession:
     """
     Crée et configure la SparkSession avec les dépendances nécessaires.
-
-    TODO : vérifier que les packages kafka et postgresql sont disponibles
     """
     return (
         SparkSession.builder
@@ -90,68 +98,84 @@ def create_spark_session() -> SparkSession:
     )
 
 
+
 # ─────────────────────────────────────────────────────────────
 # LECTURE KAFKA
 # ─────────────────────────────────────────────────────────────
+
 
 def read_kafka_stream(spark: SparkSession):
     """
     Lit le topic Kafka `listening_events` en streaming.
 
-    TODO :
-        1. Utiliser spark.readStream.format("kafka")
-        2. Configurer kafka.bootstrap.servers, subscribe, startingOffsets
-        3. Caster la colonne "value" (bytes) en string
-        4. Parser le JSON avec from_json() et LISTENING_EVENT_SCHEMA
-        5. Caster la colonne "timestamp" (string ISO) en TimestampType
-        6. Renommer en "event_time" pour les fenêtres temporelles
+    1. Utilise spark.readStream.format("kafka")
+    2. Configure kafka.bootstrap.servers, subscribe, startingOffsets="latest"
+    3. Cast la colonne "value" (bytes) en string
+    4. Parse le JSON avec from_json() et LISTENING_EVENT_SCHEMA
+    5. Cast la colonne "timestamp" (string ISO) en TimestampType
+    6. Renomme en "event_time" pour les fenêtres temporelles
 
     Returns:
         DataFrame streaming avec colonnes typées
     """
-    raise NotImplementedError("TODO : implémenter read_kafka_stream()")
+    # Lecture brute depuis Kafka
+    kafka_df = (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", KAFKA_TOPIC)
+        .option("startingOffsets", "latest")
+        .option("failOnDataLoss", "false")
+        .load()
+    )
+
+    # Cast value (bytes) → string
+    kafka_df = kafka_df.selectExpr("CAST(value AS STRING) as value")
+
+    # Désérialisation JSON
+    events_df = kafka_df.select(
+        F.from_json(F.col("value"), LISTENING_EVENT_SCHEMA).alias("data")
+    ).select("data.*")
+
+    # Cast timestamp ISO → TimestampType et rename en event_time
+    events_df = events_df.withColumn(
+        "event_time",
+        F.to_timestamp(F.col("timestamp"))
+    )
+
+    return events_df
+
 
 
 # ─────────────────────────────────────────────────────────────
 # AGRÉGATIONS STREAMING
 # ─────────────────────────────────────────────────────────────
 
+
 def compute_top_tracks_tumbling(events_df):
     """
     Top 10 des tracks par tumbling window de 5 minutes.
-
-    TODO :
-        1. groupBy(window("event_time", "5 minutes"), "track_id")
-        2. agg(count("*").alias("stream_count"), countDistinct("user_id").alias("unique_listeners"))
-        3. Output mode : "update" (on met à jour au fur et à mesure)
-        4. Écrire dans PostgreSQL table realtime_top_tracks
-
-    Hint : pour écrire dans PostgreSQL depuis Spark Streaming,
-    utiliser foreachBatch() et df.write.jdbc() dans le batch.
+    Pour le moment, on utilise juste un sink console pour valider.
     """
-    raise NotImplementedError("TODO : implémenter compute_top_tracks_tumbling()")
+    # Pour l'instant, on écrit directement les events bruts en console
+    # (Phase suivante : implémenter les agrégations et PostgreSQL)
+    query = (
+        events_df.writeStream
+        .outputMode("append")
+        .format("console")
+        .option("truncate", "false")
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .trigger(processingTime="10 seconds") # test : exécuter une fois et s'arrêter
+        .start()
+    )
+    return query
 
-
-def compute_genre_listeners_sliding(events_df, catalog_df):
-    """
-    Listeners uniques par genre en sliding window (15 min glissant toutes les 5 min).
-
-    TODO :
-        1. Joindre events_df avec catalog_df (stream-static join sur track_id)
-           pour récupérer le genre du morceau
-        2. groupBy(window("event_time", "15 minutes", "5 minutes"), "genre")
-        3. agg(countDistinct("user_id").alias("unique_listeners"))
-        4. Écrire dans Redis (clé "genre_listeners:live") via foreachBatch
-           Utiliser redis-py dans le batch
-
-    Hint : charger le catalogue PostgreSQL comme DataFrame statique avec spark.read.jdbc()
-    """
-    raise NotImplementedError("TODO : implémenter compute_genre_listeners_sliding()")
 
 
 # ─────────────────────────────────────────────────────────────
 # POINT D'ENTRÉE
 # ─────────────────────────────────────────────────────────────
+
 
 def main():
     spark = create_spark_session()
@@ -164,15 +188,12 @@ def main():
     # Lecture Kafka
     events_df = read_kafka_stream(spark)
 
-    # Chargement du catalogue (jointure statique — Phase 2, seq 2.3)
-    # catalog_df = spark.read.jdbc(POSTGRES_URL, "tracks", properties=POSTGRES_PROPS)
+    # Agrégations (pour l'instant console)
+    query = compute_top_tracks_tumbling(events_df)
 
-    # Agrégations
-    query_top_tracks = compute_top_tracks_tumbling(events_df)
-    # query_genres     = compute_genre_listeners_sliding(events_df, catalog_df)
+    # Attendre la fin
+    query.awaitTermination()
 
-    # Attendre l'arrêt gracieux
-    spark.streams.awaitAnyTermination()
 
 
 if __name__ == "__main__":
