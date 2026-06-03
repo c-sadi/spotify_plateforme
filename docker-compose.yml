@@ -91,7 +91,7 @@ services:
       mc mb local/spotify-checkpoints || true;
       mc mb local/spotify-audio || true;
       mc mb local/labels-raw || true;
-      echo 'Buckets MinIO initialisés';
+      echo 'Buckets MinIO initialises';
       "
 
   # ─────────────────────────────────────────
@@ -158,10 +158,15 @@ services:
         airflow connections add spotify_minio \
           --conn-type aws \
           --conn-extra '{"endpoint_url": "http://minio:9000", "aws_access_key_id": "minioadmin", "aws_secret_access_key": "minioadmin"}'
-        echo "Airflow initialisé avec succès"
+        echo "Airflow initialise avec succes"
 
+<<<<<<< HEAD
  # ─────────────────────────────────────────
   # KAFKA (Phase 2 — Activé !)
+=======
+  # ─────────────────────────────────────────
+  # KAFKA (Phase 2)
+>>>>>>> c1e248552600b39e0f3e08a449dc1a621a1e02fb
   # ─────────────────────────────────────────
 
   kafka-1:
@@ -280,4 +285,8 @@ volumes:
   airflow-logs:
   kafka-1-data:
   kafka-2-data:
+<<<<<<< HEAD
   kafka-3-data: 
+=======
+  kafka-3-data:
+>>>>>>> c1e248552600b39e0f3e08a449dc1a621a1e02fb
