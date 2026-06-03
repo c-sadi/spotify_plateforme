@@ -39,8 +39,7 @@ Collaborative filtering simplifié :
 2. Calculer la similarité cosinus entre utilisateurs
 3. Pour chaque user, recommander les tracks aimés par ses voisins
 
-### TODO
-Compléter les 3 tâches marquées NotImplementedError.
+
 """
 
 DEFAULT_ARGS = {

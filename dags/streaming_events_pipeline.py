@@ -64,8 +64,7 @@ les valide, les enrichit et les stocke en dual : Parquet (MinIO) + PostgreSQL.
 Chaque event est identifié par `event_id` (UUID). L'upsert utilise
 `ON CONFLICT (id) DO NOTHING` pour éviter les doublons.
 
-### TODO
-Compléter les 5 tâches marquées NotImplementedError.
+
 """
 
 DEFAULT_ARGS = {

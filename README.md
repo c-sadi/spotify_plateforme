@@ -10,13 +10,28 @@ Ce projet se construit **brique par brique sur 5 jours**. Chaque livrable s'appu
 
 ## Ce que vous allez construire
 
+## Ce que vous allez construire
+
 ```
-Sources ──► Kafka topics ──► Spark Streaming ──► PostgreSQL / Redis
-              │                                         │
-              └──► Airflow DAGs (batch) ────────────────┘
-                                                        │
-                                              MinIO (Parquet)
-```
+[ Événements Bruts : P2P Simulator ] ──► [ Buffer : Redis Pub/Sub ]
+                                                  │
+                                                  ▼
+                                        [ Apache Airflow 2.x ]
+                                                  │
+           ┌──────────────────────────────────────┴──────────────────────────────────────┐
+           ▼ (Flux Valide)                                                               ▼ (Flux Invalide)
+    Transformation & Enrichissement                                                      Clinique des Bugs
+           │                                                                             │
+   ┌───────┴───────────────────────┐                                                     ▼
+   ▼ (Stockage Chaud)              ▼ (Stockage Froid)                             PostgreSQL (OLTP)
+  PostgreSQL (OLTP)              MinIO S3 Object Storage                      Table: dead_letter_events
+Tables: listening_events,       Bucket: spotify-parquet (Parquet)               (Pour re-traitement)
+top_tracks                      Partition: date=.../hour=...
+   │
+   ▼
+  Cache / Recommendation Layer
+Redis DB/1 (Clés reco:user_*)
+``
 
 | Couche | Technologie | Ce que vous implémentez |
 |--------|-------------|------------------------|
@@ -53,12 +68,12 @@ Construire le socle batch de SPOTIFY avec Airflow.
 ```
 
 **Critères de validation Phase 1 :**
-- [ ] Les 5 DAGs s'exécutent sans erreur avec le simulateur P2P actif
-- [ ] Le catalogue est peuplé avec les données des 3 labels fournis
-- [ ] Les agrégats sont cohérents avec les données source
-- [ ] Les recommandations sont générées et accessibles dans Redis
-- [ ] La DLQ capture les événements défectueux sans bloquer les pipelines
-- [ ] Une suite pytest couvre structure + transformations
+- [x] Les 5 DAGs s'exécutent sans erreur avec le simulateur P2P actif
+- [x] Le catalogue est peuplé avec les données des 3 labels fournis
+- [x] Les agrégats sont cohérents avec les données source
+- [x] Les recommandations sont générées et accessibles dans Redis
+- [x] La DLQ capture les événements défectueux sans bloquer les pipelines
+- [x] Une suite pytest couvre structure + transformations
 
 ---
 

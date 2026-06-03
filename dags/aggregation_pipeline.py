@@ -47,8 +47,7 @@ Attend la fin de `streaming_events_pipeline` via ExternalTaskSensor.
 Incrémentale : calcule uniquement pour `execution_date` (le jour courant).
 Idempotente : INSERT ... ON CONFLICT (track_id, date) DO UPDATE SET ...
 
-### TODO
-Compléter les 4 tâches marquées NotImplementedError.
+
 """
 
 DEFAULT_ARGS = {

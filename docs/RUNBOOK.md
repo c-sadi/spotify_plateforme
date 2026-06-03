@@ -29,7 +29,15 @@ docker exec airflow-scheduler airflow tasks clear <dag_id> -t <task_id> --yes
 docker compose restart airflow-worker
 ```
 
-**Cause probable :** → À compléter par votre groupe après avoir rencontré cet incident
+**Cause probable :** Cause probable : Désynchronisation temporelle sur l'opérateur ExternalTaskSensor (dans aggregation_pipeline). Le capteur cherche une exécution réussie du pipeline streaming_events_pipeline à une heure de calendrier strictement identique. Si l'un des DAGs a été déclenché manuellement (execution_date différente), le capteur tourne dans le vide en attendant un run qui n'existe pas.
+
+INC-01B — Erreur SQL : Conflit de types UUID vs TEXT
+Symptômes : Les tâches d'insertion échouent brutalement avec l'erreur :
+psycopg2.errors.UndefinedFunction: operator does not exist: uuid = text
+
+Résolution :
+Ajouter un transtypage explicite (Type Casting) dans la requête SQL du DAG pour forcer PostgreSQL à comparer des chaînes de caractères : WHERE track_id::text = %s
+Relancer ensuite le scheduler pour vider le cache : docker compose restart airflow-scheduler
 
 ---
 
@@ -45,14 +53,11 @@ SELECT max_conn FROM pg_settings WHERE name='max_connections';
 
 **Résolution :**
 ```bash
-# Augmenter max_connections dans docker-compose
-# PostgreSQL environment: POSTGRES_MAX_CONNECTIONS: 200
+# Court terme : killer les connexions idle pour libérer de la place
+# Ouvrir psql : docker compose exec postgres psql -U airflow -d spotify
+# SQL : SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle';
 
-# Court terme : killer les connexions idle
-# SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle';
-```
-
-**Prévention :** → À compléter (hint : Airflow pools)
+**Prévention :** Augmenter max_connections à 200 dans les variables d'environnement du service postgres dans le docker-compose.yml et configurer un Pool Airflow limité à 10 slots dans l'UI Airflow pour brider l'ORM.
 
 ---
 
@@ -69,8 +74,16 @@ curl http://localhost:9000/minio/health/live
 **Résolution :**
 ```bash
 docker compose restart minio
-# Attendre 10s puis relancer le DAGRun
+# Attendre 10s puis relancer la tâche en échec sur Airflow
 ```
+### INC-03B — Saturation de la base Dead Letter Queue (DLQ)
+Symptômes : La table dead_letter_events accumule des milliers de lignes de bugs et ralentit Postgres.
+
+Résolution :
+
+Corriger la cause racine dans le simulateur P2P (champs manquants ou durées négatives).
+
+Déclencher manuellement le DAG de secours dlq_reprocessing_pipeline depuis l'UI Airflow pour nettoyer, corriger et réinjecter automatiquement les messages vers le circuit normal.
 
 ---
 
