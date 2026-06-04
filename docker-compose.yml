@@ -160,13 +160,8 @@ services:
           --conn-extra '{"endpoint_url": "http://minio:9000", "aws_access_key_id": "minioadmin", "aws_secret_access_key": "minioadmin"}'
         echo "Airflow initialise avec succes"
 
-<<<<<<< HEAD
- # ─────────────────────────────────────────
-  # KAFKA (Phase 2 — Activé !)
-=======
   # ─────────────────────────────────────────
   # KAFKA (Phase 2)
->>>>>>> c1e248552600b39e0f3e08a449dc1a621a1e02fb
   # ─────────────────────────────────────────
 
   kafka-1:
@@ -252,9 +247,8 @@ services:
       "
 
   # ─────────────────────────────────────────
-# SPARK (Phase 2 — décommenter jeudi matin)
-# ─────────────────────────────────────────
-
+  # SPARK (Phase 2)
+  # ─────────────────────────────────────────
 
   spark-master:
     image: apache/spark:3.5.0
@@ -262,16 +256,11 @@ services:
     environment:
       SPARK_MASTER_PORT: "7077"
       SPARK_MASTER_WEBUI_PORT: "8888"
-    networks:
-      default: null
     ports:
       - "7077:7077"
       - "8888:8888"
     volumes:
-      - type: bind
-        source: C:\Users\Celine\spotify_plateforme\spark_jobs
-        target: /opt/spark-jobs
-        bind: {}
+      - ./spark_jobs:/opt/spark_jobs
 
   spark-worker-1:
     image: apache/spark:3.5.0
@@ -281,13 +270,8 @@ services:
     environment:
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2G
-    networks:
-      default: null
     volumes:
-      - type: bind
-        source: C:\Users\Celine\spotify_plateforme\spark_jobs
-        target: /opt/spark-jobs
-        bind: {}
+      - ./spark_jobs:/opt/spark_jobs
 
 volumes:
   postgres-data:
@@ -295,8 +279,4 @@ volumes:
   airflow-logs:
   kafka-1-data:
   kafka-2-data:
-<<<<<<< HEAD
   kafka-3-data: 
-=======
-  kafka-3-data:
->>>>>>> c1e248552600b39e0f3e08a449dc1a621a1e02fb
