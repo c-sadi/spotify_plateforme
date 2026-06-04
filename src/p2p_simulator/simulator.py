@@ -35,7 +35,7 @@ logger = logging.getLogger("p2p_simulator")
 # ─────────────────────────────────────────────────────────────
 
 REDIS_URL = "redis://redis:6379/1"
-KAFKA_BOOTSTRAP = "kafka-1:9092" 
+KAFKA_BOOTSTRAP = "kafka-1:9092"
 
 TOPICS = {
     "listening":   "listening_events",
@@ -87,13 +87,19 @@ class P2PSimulator:
         # Connexion Redis
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
 
-        # Phase 2 — Configuration du producteur Kafka Idempotent et Robuste
+        # ── TICKET #16 — Exactly-once : producteur idempotent + transactionnel ──
         kafka_config = {
             "bootstrap.servers": KAFKA_BOOTSTRAP,
-            "acks": "all",                      # Durabilité maximale
-            "enable.idempotence": True          # Exactly-Once à l'écriture
+            "acks": "all",                          # Durabilité maximale (tous les replicas)
+            "enable.idempotence": True,             # Évite les doublons réseau
+            "transactional.id": "p2p-simulator-1", # ID unique pour les transactions
+            "max.in.flight.requests.per.connection": 5,
+            "retries": 2147483647,
         }
         self.kafka_producer = Producer(kafka_config)
+        # Initialiser le gestionnaire de transactions Kafka
+        self.kafka_producer.init_transactions()
+        # ── fin TICKET #16 ──────────────────────────────────────────────────────
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
@@ -211,7 +217,7 @@ class P2PSimulator:
 
         # 1. Publication Redis (Phase 1 active)
         self._publish_to_redis(channel, payload)
-        
+
         # 2. Publication Kafka (Phase 2 active)
         partition_key = event.get("user_id", event.get("peer_id", ""))
         self._publish_to_kafka(channel, partition_key, payload)
@@ -229,22 +235,31 @@ class P2PSimulator:
             logger.error(f"❌ Échec de livraison Kafka : {err}")
 
     def _publish_to_kafka(self, topic: str, key: str, payload: str):
-        """Publie le payload dans le topic Kafka avec clé de partitionnement."""
+        """
+        Publie le payload dans le topic Kafka avec transaction pour exactly-once.
+        TICKET #16 — chaque message est encapsulé dans une transaction Kafka.
+        """
         try:
+            # ── TICKET #16 — Publication transactionnelle ──
+            self.kafka_producer.begin_transaction()
             self.kafka_producer.produce(
                 topic=topic,
                 key=key.encode('utf-8') if key else None,
                 value=payload.encode('utf-8'),
                 callback=self._delivery_report
             )
-            # Déclenche les rapports de livraison en arrière-plan sans bloquer
+            self.kafka_producer.commit_transaction()
+            # ── fin TICKET #16 ─────────────────────────────
             self.kafka_producer.poll(0)
         except Exception as e:
             logger.error(f"Erreur de publication vers Kafka sur le topic {topic} : {e}")
+            try:
+                self.kafka_producer.abort_transaction()
+            except Exception:
+                pass
 
     def _shutdown(self, signum, frame):
         logger.info(f"Arrêt du simulateur (signal {signum}) — {self.event_count} événements publiés")
-        # Attendre que les derniers messages en attente soient envoyés à Kafka avant de fermer
         self.kafka_producer.flush(timeout=3)
         self.running = False
 
@@ -271,4 +286,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
