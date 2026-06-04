@@ -182,3 +182,124 @@ docker logs spark-master | grep "checkpoint"
 **Comportement observé (Spark) :** ...
 
 **Données perdues :** oui / non — détails : ...
+
+
+## RUNBOOK Exactly-Once Semantics
+# Architecture
+
+Producteur → Kafka → Spark Streaming → PostgreSQL
+
+
+## Configuration exactly-once
+
+### Producteur Kafka
+
+| Paramètre | Valeur | Rôle |
+|-----------|--------|------|
+| `enable.idempotence` | `True` | Évite les doublons réseau |
+| `acks` | `all` | Confirmation tous les replicas |
+| `transactional.id` | `p2p-simulator-1` | ID transaction unique |
+
+### Consommateur Spark
+
+| Paramètre | Valeur | Rôle |
+|-----------|--------|------|
+| `kafka.consumer.isolation.level` | `read_committed` | Lit uniquement les messages commités |
+| `checkpointLocation` | `s3a://spotify-checkpoints/streaming_trends` | Reprise sans doublon |
+
+## Procédure de vérification
+
+### 1. Avant redémarrage
+
+```sql
+SELECT COUNT(*) AS total, 
+       COUNT(DISTINCT id) AS distincts,
+       COUNT(*) - COUNT(DISTINCT id) AS doublons
+FROM listening_events;
+```
+
+### 2. Simuler une panne
+
+- **Stopper le job Spark :**
+  ```bash
+  docker stop spotify_plateforme-spark-master-1
+  ```
+- **Attendre 2 minutes** (le producteur continue d'envoyer dans Kafka)
+- **Relancer :**
+  ```bash
+  docker start spotify_plateforme-spark-master-1
+  ```
+
+### 3. Vérification post-redémarrage
+
+```sql
+SELECT COUNT(*) - COUNT(DISTINCT id) AS doublons
+FROM listening_events;
+-- Résultat attendu : 0
+```
+
+## Résultat obtenu
+
+La requête de validation a été exécutée et retourne `total=0` car le job Spark n'a pas pu écrire dans PostgreSQL en raison d'un problème de permissions et de ressources machine. Les données sont présentes dans Kafka (validé via `kafka-console-consumer`) mais n'ont pas été consommées.
+
+**Flux partiellement validé :**
+- Phase 1 : Simulateur → Kafka (test réussi)
+- Phase 2 : Kafka → Spark → PostgreSQL (test non réussi)
+
+## Lien avec la Phase 1 (Airflow)
+
+| Aspect | Phase 1 (Airflow) | Phase 2 (Kafka/Spark) |
+|--------|-------------------|----------------------|
+| Dédoublement | `DELETE + INSERT` avec clés manuelles | `exactly-once` natif Kafka/Spark |
+| Garantie | Application-level | Infrastructure-level |
+| Récupération | Script manuelle | `checkpointLocation` + `read_committed` |
+
+> Le `ON CONFLICT (id) DO NOTHING` remplace les `DELETE + INSERT` Airflow.
+
+## Commandes utiles
+
+### Lancer le job Spark
+
+```bash
+docker exec spotify_plateforme-spark-master-1 /opt/bitnami/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1 \
+  /opt/spark-jobs/streaming_trends_job.py
+```
+
+### Vérifier Kafka
+
+```bash
+docker exec -it spotify_plateforme-kafka-1 bash
+kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic listening_events \
+  --from-beginning \
+  --max-messages 5
+```
+
+### Vérifier PostgreSQL
+
+```bash
+docker exec -it spotify_plateforme-postgres-1 psql -U spotify -d spotify
+
+SELECT COUNT(*) AS total, 
+       COUNT(DISTINCT id) AS distincts,
+       COUNT(*) - COUNT(DISTINCT id) AS doublons
+FROM listening_events;
+```
+
+### Interface Spark UI
+
+- **URL :** http://localhost:8080 ou http://localhost:4040
+- **Permet de voir :** Applications actives, Stages, Tâches, Lectures Kafka
+
+## Critère de validation final
+
+```sql
+SELECT COUNT(*) - COUNT(DISTINCT id) AS doublons
+FROM listening_events;
+-- Résultat attendu : 0
+```
+
+Si `doublons = 0` et que `COUNT(DISTINCT id)` est identique avant/après redémarrage, le pipeline est **exactly-once**.
